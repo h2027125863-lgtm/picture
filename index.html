@@ -1,0 +1,550 @@
+
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<title>透明羽化图片转场</title>
+
+<style>
+* {
+  box-sizing: border-box;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  background: transparent !important;
+  overflow: hidden;
+}
+
+body {
+  display: grid;
+  place-items: center;
+}
+
+#stage {
+  position: relative;
+  width: min(100%, 1100px);
+  aspect-ratio: 4 / 3;
+  overflow: hidden;
+  background: transparent !important;
+  cursor: pointer;
+  touch-action: pan-y;
+  -webkit-tap-highlight-color: transparent;
+}
+
+#canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: transparent !important;
+  pointer-events: none;
+}
+</style>
+</head>
+
+<body>
+
+<div id="stage">
+  <canvas id="canvas"></canvas>
+</div>
+
+<script>
+(() => {
+  "use strict";
+
+  // ========================
+  // 1. 图片路径
+  // ========================
+
+  const SOURCES = [
+    "image-1.webp",
+    "image-2.webp",
+    "image-3.webp"
+  ];
+
+  // ========================
+  // 2. 动画时间设置
+  // ========================
+
+  const FADE_IN = 1000;  // 第一张淡入1秒
+
+  const HOLD = 2000;     // 停留2秒
+
+  const FAN = 1350;      // 扇形转场1.35秒
+
+  const DURATION =
+    FADE_IN + HOLD + FAN + HOLD + FAN;
+
+  // ========================
+  // 3. 羽化参数
+  // ========================
+
+  const FEATHER_X = 0.082;
+  const FEATHER_Y = 0.105;
+
+  // 扇形边缘模糊范围
+  const FAN_EDGE = 0.048;
+
+  // ========================
+  // 4. 获取页面元素
+  // ========================
+
+  const stage = document.getElementById("stage");
+  const canvas = document.getElementById("canvas");
+
+  const ctx = canvas.getContext("2d", {
+    alpha: true
+  });
+
+  const images = SOURCES.map(src => {
+    const img = new Image();
+    img.src = src;
+    return img;
+  });
+
+  let width = 0;
+  let height = 0;
+
+  let layers = [];
+  let workCanvas;
+  let workCtx;
+
+  let ready = false;
+  let animationId = null;
+  let startTime = null;
+  let completed = false;
+  let mouseInside = false;
+
+  // ========================
+  // 5. 缓动函数
+  // ========================
+
+  function ease(t) {
+    t = Math.max(0, Math.min(1, t));
+    return t * t * (3 - 2 * t);
+  }
+
+  function createCanvas(w, h) {
+    const c = document.createElement("canvas");
+    c.width = w;
+    c.height = h;
+    return c;
+  }
+
+  // ========================
+  // 6. 图片四周羽化
+  // ========================
+
+  function featherImage(img) {
+    const c = createCanvas(width, height);
+    const g = c.getContext("2d");
+
+    const imgRatio =
+      img.naturalWidth / img.naturalHeight;
+
+    const boxRatio = width / height;
+
+    let dw, dh;
+
+    if (imgRatio > boxRatio) {
+      dw = width;
+      dh = width / imgRatio;
+    } else {
+      dh = height;
+      dw = height * imgRatio;
+    }
+
+    const x = (width - dw) / 2;
+    const y = (height - dh) / 2;
+
+    g.drawImage(img, x, y, dw, dh);
+
+    // 使用透明蒙版，让图片四边渐隐
+    g.globalCompositeOperation = "destination-in";
+
+    const fx = width * FEATHER_X;
+    const fy = height * FEATHER_Y;
+
+    // 左右羽化
+    const gradX = g.createLinearGradient(
+      0, 0, width, 0
+    );
+
+    gradX.addColorStop(
+      0,
+      "rgba(255,255,255,0)"
+    );
+
+    gradX.addColorStop(
+      fx / width,
+      "rgba(255,255,255,1)"
+    );
+
+    gradX.addColorStop(
+      1 - fx / width,
+      "rgba(255,255,255,1)"
+    );
+
+    gradX.addColorStop(
+      1,
+      "rgba(255,255,255,0)"
+    );
+
+    g.fillStyle = gradX;
+    g.fillRect(0, 0, width, height);
+
+    // 上下羽化
+    const gradY = g.createLinearGradient(
+      0, 0, 0, height
+    );
+
+    gradY.addColorStop(
+      0,
+      "rgba(255,255,255,0)"
+    );
+
+    gradY.addColorStop(
+      fy / height,
+      "rgba(255,255,255,1)"
+    );
+
+    gradY.addColorStop(
+      1 - fy / height,
+      "rgba(255,255,255,1)"
+    );
+
+    gradY.addColorStop(
+      1,
+      "rgba(255,255,255,0)"
+    );
+
+    g.fillStyle = gradY;
+    g.fillRect(0, 0, width, height);
+
+    g.globalCompositeOperation = "source-over";
+
+    return c;
+  }
+
+  // ========================
+  // 7. 画布尺寸适配
+  // ========================
+
+  function resize() {
+    if (!ready) return;
+
+    const rect = stage.getBoundingClientRect();
+
+    const ratio = Math.min(
+      window.devicePixelRatio || 1,
+      1.7
+    );
+
+    width = canvas.width =
+      Math.round(rect.width * ratio);
+
+    height = canvas.height =
+      Math.round(rect.height * ratio);
+
+    layers = images.map(featherImage);
+
+    workCanvas = createCanvas(width, height);
+    workCtx = workCanvas.getContext("2d");
+  }
+
+  // ========================
+  // 8. 扇形转场
+  // ========================
+
+  function drawFan(index, progress, incoming) {
+    const p = ease(progress);
+
+    const band = Math.max(
+      12,
+      width * FAN_EDGE
+    );
+
+    const step = Math.max(
+      2,
+      Math.round(height / 180)
+    );
+
+    workCtx.clearRect(
+      0, 0, width, height
+    );
+
+    workCtx.drawImage(layers[index], 0, 0);
+
+    workCtx.globalCompositeOperation =
+      "destination-in";
+
+    // 逐行生成柔和的弧形过渡边缘
+    for (let y = 0; y < height; y += step) {
+
+      const norm =
+        ((y + step / 2) / height - 0.5) * 2;
+
+      // 弧形偏移
+      const arc =
+        width * 0.19 *
+        Math.sin(Math.PI * p) *
+        Math.sqrt(
+          Math.max(0, 1 - norm * norm)
+        );
+
+      // 扇面倾斜
+      const tilt =
+        width * 0.055 *
+        Math.sin(Math.PI * p) *
+        norm;
+
+      // 从右向左推进
+      const edgeX =
+        width * (1 - p) + arc + tilt;
+
+      const gradient =
+        workCtx.createLinearGradient(
+          edgeX - band, 0,
+          edgeX + band, 0
+        );
+
+      if (incoming) {
+        // 新图片从右侧逐渐出现
+        gradient.addColorStop(
+          0,
+          "rgba(255,255,255,0)"
+        );
+
+        gradient.addColorStop(
+          1,
+          "rgba(255,255,255,1)"
+        );
+      } else {
+        // 旧图片向左逐渐消失
+        gradient.addColorStop(
+          0,
+          "rgba(255,255,255,1)"
+        );
+
+        gradient.addColorStop(
+          1,
+          "rgba(255,255,255,0)"
+        );
+      }
+
+      workCtx.fillStyle = gradient;
+
+      workCtx.fillRect(
+        0,
+        y,
+        width,
+        Math.min(step, height - y)
+      );
+    }
+
+    workCtx.globalCompositeOperation =
+      "source-over";
+
+    ctx.drawImage(workCanvas, 0, 0);
+  }
+
+  // ========================
+  // 9. 根据时间绘制画面
+  // ========================
+
+  function render(time) {
+    if (!ready || !layers.length) return;
+
+    ctx.clearRect(
+      0, 0, width, height
+    );
+
+    const t1 = FADE_IN;
+    const t2 = t1 + HOLD;
+    const t3 = t2 + FAN;
+    const t4 = t3 + HOLD;
+    const t5 = t4 + FAN;
+
+    if (time < t1) {
+
+      // 第一张图片淡入
+      ctx.globalAlpha = ease(
+        time / FADE_IN
+      );
+
+      ctx.drawImage(layers[0], 0, 0);
+
+    } else if (time < t2) {
+
+      // 第一张停顿
+      ctx.drawImage(layers[0], 0, 0);
+
+    } else if (time < t3) {
+
+      // 第一张向左淡出
+      // 第二张从右侧同时淡入
+      const p = (time - t2) / FAN;
+
+      drawFan(0, p, false);
+      drawFan(1, p, true);
+
+    } else if (time < t4) {
+
+      // 第二张停顿
+      ctx.drawImage(layers[1], 0, 0);
+
+    } else if (time < t5) {
+
+      // 第二张向左淡出
+      // 第三张从右侧同时淡入
+      const p = (time - t4) / FAN;
+
+      drawFan(1, p, false);
+      drawFan(2, p, true);
+
+    } else {
+
+      // 保留第三张
+      ctx.drawImage(layers[2], 0, 0);
+    }
+
+    ctx.globalAlpha = 1;
+  }
+
+  // ========================
+  // 10. 动画循环
+  // ========================
+
+  function frame(now) {
+    if (startTime === null) {
+      startTime = now;
+    }
+
+    const time = Math.min(
+      DURATION,
+      now - startTime
+    );
+
+    render(time);
+
+    if (time < DURATION) {
+      animationId =
+        requestAnimationFrame(frame);
+    } else {
+      animationId = null;
+      completed = true;
+    }
+  }
+
+  function start() {
+    if (!ready) return;
+
+    if (animationId !== null) {
+      cancelAnimationFrame(animationId);
+    }
+
+    completed = false;
+    startTime = null;
+
+    render(0);
+
+    animationId =
+      requestAnimationFrame(frame);
+  }
+
+  // ========================
+  // 11. 鼠标与触摸触发
+  // ========================
+
+  stage.addEventListener(
+    "pointerenter",
+    e => {
+      if (
+        e.pointerType === "mouse" ||
+        e.pointerType === "pen"
+      ) {
+        if (!mouseInside && animationId === null) {
+          start();
+        }
+
+        mouseInside = true;
+      }
+    }
+  );
+
+  stage.addEventListener(
+    "pointerleave",
+    () => {
+      mouseInside = false;
+    }
+  );
+
+  stage.addEventListener(
+    "pointerdown",
+    () => {
+      start();
+    }
+  );
+
+  // ========================
+  // 12. 窗口变化
+  // ========================
+
+  window.addEventListener("resize", () => {
+    if (!ready) return;
+
+    const wasPlaying = animationId !== null;
+
+    const elapsed =
+      wasPlaying && startTime !== null
+      ? performance.now() - startTime
+      : 0;
+
+    if (animationId !== null) {
+      cancelAnimationFrame(animationId);
+    }
+
+    animationId = null;
+    resize();
+
+    if (wasPlaying) {
+      startTime = performance.now() - elapsed;
+      animationId = requestAnimationFrame(frame);
+    } else if (completed) {
+      render(DURATION);
+    } else {
+      ctx.clearRect(0, 0, width, height);
+    }
+  });
+
+  // ========================
+  // 13. 加载图片
+  // ========================
+
+  Promise.all(
+    images.map(img => img.decode())
+  ).then(() => {
+
+    ready = true;
+    resize();
+
+    // 初始画面完全透明
+    ctx.clearRect(0, 0, width, height);
+
+  }).catch(error => {
+    console.error("图片加载失败：", error);
+  });
+
+  // 外部页面可调用
+  window.playFeatherGallery = start;
+
+})();
+</script>
+
+</body>
+</html>
